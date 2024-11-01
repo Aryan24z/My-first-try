@@ -6,41 +6,9 @@ from functools import wraps
 app = Flask(__name__)
 
 # Connect to SQLite database (or create it if it doesn't exist)
-conn = sqlite3.connect("pizza_delivery.db", check_same_thread=False)
-cursor = conn.cursor()
-
-# Create tables for users, orders, and notifications
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        role TEXT DEFAULT 'user'  -- Default role for users
-    )
-''')
-
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS orders (
-        order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        pizza_type TEXT,
-        quantity INTEGER,
-        status TEXT DEFAULT 'Pending',
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-''')
-
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS notifications (
-        notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        message TEXT,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-''')
-
-# Commit table creation
-conn.commit()
+def create_connection():
+    conn = sqlite3.connect("pizza_delivery.db", check_same_thread=False)
+    return conn
 
 # Hashing function
 def hash_password(password):
@@ -53,6 +21,8 @@ def login_required(f):
         username = request.headers.get("Authorization")
         if not username:
             return jsonify({"message": "Authorization header missing"}), 403
+        conn = create_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
         if not cursor.fetchone():
             return jsonify({"message": "User not logged in"}), 403
@@ -72,12 +42,17 @@ def register():
     password = data.get('password')
     hashed_password = hash_password(password)
 
+    conn = create_connection()
+    cursor = conn.cursor()
+    
     try:
         cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
         conn.commit()
         return jsonify({"message": "User registered successfully"}), 201
     except sqlite3.IntegrityError:
         return jsonify({"message": "Username already exists"}), 409
+    finally:
+        conn.close()
 
 # Login endpoint
 @app.route('/login', methods=['POST'])
@@ -90,8 +65,14 @@ def login():
         return jsonify({"message": "Admin logged in"}), 200
     
     hashed_password = hash_password(password)
+    conn = create_connection()
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT id FROM users WHERE username = ? AND password = ?", (username, hashed_password))
     user = cursor.fetchone()
+    
+    conn.close()
+    
     if user:
         return jsonify({"message": "User logged in", "user_id": user[0]}), 200
     return jsonify({"message": "Invalid credentials"}), 401
@@ -105,11 +86,16 @@ def create_order():
     quantity = data.get("quantity")
     username = request.headers.get("Authorization")
 
+    conn = create_connection()
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
     user_id = cursor.fetchone()[0]
     
     cursor.execute("INSERT INTO orders (user_id, pizza_type, quantity) VALUES (?, ?, ?)", (user_id, pizza_type, quantity))
     conn.commit()
+    conn.close()
+    
     return jsonify({"message": "Order created successfully"}), 201
 
 # View orders endpoint
@@ -117,15 +103,20 @@ def create_order():
 @login_required
 def view_orders():
     username = request.headers.get("Authorization")
+    conn = create_connection()
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
     user_id = cursor.fetchone()[0]
 
     cursor.execute("SELECT order_id, pizza_type, quantity, status FROM orders WHERE user_id = ?", (user_id,))
     orders = cursor.fetchall()
     
+    conn.close()
+    
     return jsonify({"orders": [{"order_id": order[0], "pizza_type": order[1], "quantity": order[2], "status": order[3]} for order in orders]}), 200
 
-# Admin view all orders
+# Admin view all orders endpoint
 @app.route('/admin/orders', methods=['GET'])
 @login_required
 def admin_view_orders():
@@ -133,16 +124,17 @@ def admin_view_orders():
     if username != "aryan":
         return jsonify({"message": "Unauthorized"}), 403
 
+    conn = create_connection()
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT o.order_id, u.username, o.pizza_type, o.quantity, o.status FROM orders o JOIN users u ON o.user_id = u.id")
     orders = cursor.fetchall()
+
+    conn.close()
 
     return jsonify({"orders": [{"order_id": order[0], "username": order[1], "pizza_type": order[2], "quantity": order[3], "status": order[4]} for order in orders]}), 200
 
 # Main program entry
 if __name__ == '__main__':
     app.run(debug=True)
-
-# Close the database connection when the application exits
-@app.teardown_appcontext
-def close_connection(exception):
-    conn.close()
+    
